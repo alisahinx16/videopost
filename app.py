@@ -2,6 +2,7 @@ import streamlit as st
 import yt_dlp
 import os
 import subprocess
+import json
 from PIL import Image
 
 st.set_page_config(page_title="Gelişmiş Video Filigran Aracı", layout="centered")
@@ -14,6 +15,25 @@ video_url = st.text_input("Sosyal Medya Video Linki")
 uploaded_logo = st.file_uploader("Logo Seçin (PNG/JPG)", type=["png", "jpg", "jpeg"])
 description = st.text_input("Görünür Açıklama Metni", max_chars=80)
 logo_opacity = st.slider("Logo Görünürlük Oranı (Saydamlık)", 0.1, 1.0, 0.3, step=0.05)
+
+def get_video_dimensions(video_path):
+    """ffprobe kullanarak videonun gerçek genişlik ve yükseklik değerlerini döner."""
+    cmd = [
+        'ffprobe', '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_streams', video_path
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        data = json.loads(result.stdout)
+        for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                width = int(stream.get('width'))
+                height = int(stream.get('height'))
+                return width, height
+    except Exception as e:
+        st.warning(f"Video boyutları okunurken hata oluştu, varsayılan değerler kullanılacak. Detay: {e}")
+    return 1280, 720  # Hata durumunda varsayılan değerler
 
 def download_video(url, output_path):
     """yt-dlp kullanarak videoyu indirir."""
@@ -36,37 +56,47 @@ def adjust_logo_opacity(image_path, opacity):
 
 def process_video(video_path, logo_path, text, output_path):
     """
-    FFmpeg ile logoları 9 noktaya yerleştirir ve metni Instagram 
-    güvenli bölgesine (Safe Zone) hizalar.
+    Python ile hesaplanan boyutlara göre logoları 9 noktaya yerleştirir 
+    ve metni Instagram güvenli bölgesine (Safe Zone) hizalar.
     """
+    # Video boyutlarını dinamik olarak alıyoruz
+    width, height = get_video_dimensions(video_path)
+    
+    # Logonun genişliğini video genişliğinin %12'si olacak şekilde hesaplıyoruz
+    logo_w = int(width * 0.12)
+    logo_w = max(logo_w, 40) # Çok küçük boyutları önlemek için sınır
+    
+    # Metin boyutunu video yüksekliğinin %3.5'i olacak şekilde hesaplıyoruz
+    font_size = int(height * 0.035)
+    font_size = max(font_size, 14)
+    
+    # Instagram Güvenli Bölge Y koordinatı (Yüksekliğin %75'i)
+    text_y = int(height * 0.75)
+
     filter_parts = []
     
-    # 1. Logoyu video genişliğinin %12'sine ölçekle (farklı çözünürlükler için dinamik)
-    filter_parts.append("[1:v][0:v]scale2ref=w=main_w*0.12:h=keep[logo][main]")
+    # 1. Logoyu önceden hesaplanan genişliğe göre ölçeklendir (En boy oranı korunur)
+    filter_parts.append(f"[1:v]scale={logo_w}:-1[logo]")
     
-    # 2. 9 Noktalı Grid Koordinatları (Kırpmayı önlemek için her bölgeye yerleşim)
-    # X: Sol (%15), Orta, Sağ (%85)
-    # Y: Üst (%15), Orta, Alt (Instagram güvenli bölge sınırı olan %70 seviyesi)
+    # 2. 9 Noktalı Grid Koordinatları
     positions = [
         ("W*0.15", "H*0.15"), ("(W-w)/2", "H*0.15"), ("W*0.85-w", "H*0.15"),
         ("W*0.15", "(H-h)/2"), ("(W-w)/2", "(H-h)/2"), ("W*0.85-w", "(H-h)/2"),
         ("W*0.15", "H*0.70-h"), ("(W-w)/2", "H*0.70-h"), ("W*0.85-w", "H*0.70-h")
     ]
     
-    last_output = "[main]"
+    last_output = "[0:v]"
     for i, (x, y) in enumerate(positions):
         out_label = f"[v_overlay_{i}]"
         filter_parts.append(f"{last_output}[logo]overlay=x={x}:y={y}{out_label}")
         last_output = out_label
         
-    # 3. Instagram Güvenli Bölge Metin Yerleşimi
-    # Metin, Reels arayüz elemanlarının üstünde kalacak şekilde y=H*0.75 noktasına yerleştirilir.
-    # Yazı boyutu video yüksekliğinin %3.5'i olarak dinamik hesaplanır.
-    font_size_expr = "H*0.035"
+    # 3. Metin Ekleme (Tek tırnakları FFmpeg için güvenli hale getiriyoruz)
+    safe_text = text.replace("'", "'\\''")
     text_filter = (
-        f"{last_output}drawtext=text='{text}':"
-        f"x=(w-text_w)/2:y=H*0.75:"
-        f"fontsize={font_size_expr}:fontcolor=white:"
+        f"{last_output}drawtext=text='{safe_text}':"
+        f"x=(w-text_w)/2:y={text_y}:"
+        f"fontsize={font_size}:fontcolor=white:"
         f"box=1:boxcolor=black@0.65:boxborderw=15"
     )
     filter_parts.append(text_filter)
