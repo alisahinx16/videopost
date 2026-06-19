@@ -2,38 +2,16 @@ import streamlit as st
 import yt_dlp
 import os
 import subprocess
-import json
-from PIL import Image
 
-st.set_page_config(page_title="Gelişmiş Video Filigran Aracı", layout="centered")
+st.set_page_config(page_title="Video Filigran Aracı", layout="centered")
 
-st.title("Gelişmiş Video Filigran Aracı")
-st.write("Instagram ve X uyumlu, kırpılamaz çoklu logo ve güvenli alan metin yerleşimi.")
+st.title("Mobil Video Filigran Aracı")
+st.write("Instagram/X linkini girerek çoklu logo ve güvenli alan metni ekleyebilirsiniz.")
 
 # Kullanıcı Girdileri
 video_url = st.text_input("Sosyal Medya Video Linki")
 uploaded_logo = st.file_uploader("Logo Seçin (PNG/JPG)", type=["png", "jpg", "jpeg"])
-description = st.text_input("Görünür Açıklama Metni", max_chars=80)
-logo_opacity = st.slider("Logo Görünürlük Oranı (Saydamlık)", 0.1, 1.0, 0.3, step=0.05)
-
-def get_video_dimensions(video_path):
-    """ffprobe kullanarak videonun gerçek genişlik ve yükseklik değerlerini döner."""
-    cmd = [
-        'ffprobe', '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_streams', video_path
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    try:
-        data = json.loads(result.stdout)
-        for stream in data.get('streams', []):
-            if stream.get('codec_type') == 'video':
-                width = int(stream.get('width'))
-                height = int(stream.get('height'))
-                return width, height
-    except Exception as e:
-        st.warning(f"Video boyutları okunurken hata oluştu, varsayılan değerler kullanılacak. Detay: {e}")
-    return 1280, 720  # Hata durumunda varsayılan değerler
+description = st.text_input("Kısa Açıklama", max_chars=80)
 
 def download_video(url, output_path):
     """yt-dlp kullanarak videoyu indirir."""
@@ -46,63 +24,31 @@ def download_video(url, output_path):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-def adjust_logo_opacity(image_path, opacity):
-    """Logonun saydamlığını ayarlayarak videonun görünmesini kolaylaştırır."""
-    img = Image.open(image_path).convert("RGBA")
-    alpha = img.split()[3]
-    alpha = alpha.point(lambda p: int(p * opacity))
-    img.putalpha(alpha)
-    img.save(image_path)
-
 def process_video(video_path, logo_path, text, output_path):
     """
-    Python ile hesaplanan boyutlara göre logoları 9 noktaya yerleştirir 
-    ve metni Instagram güvenli bölgesine (Safe Zone) hizalar.
+    FFmpeg ile logoyu 120px genişliğinde, %35 opaklıkla 5 noktaya yerleştirir.
+    Metni ise Instagram güvenli alanına dinamik boyutta ekler.
     """
-    # Video boyutlarını dinamik olarak alıyoruz
-    width, height = get_video_dimensions(video_path)
+    # Tek tırnak işaretlerini FFmpeg drawtext filtresi için güvenli hale getirme
+    safe_text = text.replace("'", "'\\''")
     
-    # Logonun genişliğini video genişliğinin %12'si olacak şekilde hesaplıyoruz
-    logo_w = int(width * 0.12)
-    logo_w = max(logo_w, 40) # Çok küçük boyutları önlemek için sınır
-    
-    # Metin boyutunu video yüksekliğinin %3.5'i olacak şekilde hesaplıyoruz
-    font_size = int(height * 0.035)
-    font_size = max(font_size, 14)
-    
-    # Instagram Güvenli Bölge Y koordinatı (Yüksekliğin %75'i)
-    text_y = int(height * 0.75)
-
-    filter_parts = []
-    
-    # 1. Logoyu önceden hesaplanan genişliğe göre ölçeklendir (En boy oranı korunur)
-    filter_parts.append(f"[1:v]scale={logo_w}:-1[logo]")
-    
-    # 2. 9 Noktalı Grid Koordinatları
-    positions = [
-        ("W*0.15", "H*0.15"), ("(W-w)/2", "H*0.15"), ("W*0.85-w", "H*0.15"),
-        ("W*0.15", "(H-h)/2"), ("(W-w)/2", "(H-h)/2"), ("W*0.85-w", "(H-h)/2"),
-        ("W*0.15", "H*0.70-h"), ("(W-w)/2", "H*0.70-h"), ("W*0.85-w", "H*0.70-h")
+    filter_parts = [
+        # Logonun boyutunu 120px yapar ve %35 opaklık (colorchannelmixer) uygular
+        '[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.35[logo]',
+        
+        # 5 Noktaya yerleşim zinciri (Sol Üst, Sağ Üst, Merkez, Sol Alt, Sağ Alt)
+        '[0:v][logo]overlay=x=W*0.1:y=H*0.1[v1]',
+        '[v1][logo]overlay=x=W*0.9-w:y=H*0.1[v2]',
+        '[v2][logo]overlay=x=(W-w)/2:y=(H-h)/2[v3]',
+        '[v3][logo]overlay=x=W*0.1:y=H*0.7-h[v4]',
+        '[v4][logo]overlay=x=W*0.9-w:y=H*0.7-h[v5]',
+        
+        # Metni Instagram güvenli alanına (Yüksekliğin %75'i) büyük ve okunaklı yerleştirme
+        f"[v5]drawtext=text='{safe_text}':x=(w-text_w)/2:y=h*0.75:fontsize=h*0.035:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=15"
     ]
     
-    last_output = "[0:v]"
-    for i, (x, y) in enumerate(positions):
-        out_label = f"[v_overlay_{i}]"
-        filter_parts.append(f"{last_output}[logo]overlay=x={x}:y={y}{out_label}")
-        last_output = out_label
-        
-    # 3. Metin Ekleme (Tek tırnakları FFmpeg için güvenli hale getiriyoruz)
-    safe_text = text.replace("'", "'\\''")
-    text_filter = (
-        f"{last_output}drawtext=text='{safe_text}':"
-        f"x=(w-text_w)/2:y={text_y}:"
-        f"fontsize={font_size}:fontcolor=white:"
-        f"box=1:boxcolor=black@0.65:boxborderw=15"
-    )
-    filter_parts.append(text_filter)
-    
     filter_complex_str = ";".join(filter_parts)
-    
+
     cmd = [
         'ffmpeg', '-y',
         '-i', video_path,
@@ -116,31 +62,31 @@ def process_video(video_path, logo_path, text, output_path):
     if result.returncode != 0:
         raise Exception(f"FFmpeg Hatası: {result.stderr}")
 
-if st.button("Videoyu İşle ve Hazırla") and video_url and uploaded_logo:
-    with st.spinner("Video indiriliyor ve güvenli alan hesaplamaları yapılıyor..."):
+if st.button("Videoyu İşle") and video_url and uploaded_logo:
+    with st.spinner("İşlem yapılıyor, lütfen bekleyin..."):
         input_video = "temp_input.mp4"
         input_logo = "temp_logo.png"
         output_video = "processed_output.mp4"
         
-        # Temizlik
+        # Eski geçici dosyaların temizliği
         for f in [input_video, input_logo, output_video]:
             if os.path.exists(f):
                 os.remove(f)
 
         try:
-            # Logo saydamlık ayarı
-            image = Image.open(uploaded_logo)
-            image.save(input_logo)
-            adjust_logo_opacity(input_logo, logo_opacity)
+            # Gelen logoyu geçici olarak diske yaz
+            with open(input_logo, "wb") as f:
+                f.write(uploaded_logo.getbuffer())
             
-            # Video indirme
-            st.info("Sosyal medya bağlantısı çözümleniyor...")
+            # Videoyu indir
+            st.info("Video indiriliyor...")
             download_video(video_url, input_video)
             
-            # Video işleme
-            st.info("9 noktalı filigran ve güvenli bölge metni işleniyor...")
+            # Videoyu işle
+            st.info("Logolar ve metin videoya işleniyor...")
             process_video(input_video, input_logo, description, output_video)
             
+            # İndirme butonunu göster
             if os.path.exists(output_video):
                 with open(output_video, "rb") as file:
                     st.success("Video başarıyla hazırlandı!")
@@ -155,7 +101,7 @@ if st.button("Videoyu İşle ve Hazırla") and video_url and uploaded_logo:
             st.error(f"İşlem sırasında bir hata oluştu: {str(e)}")
             
         finally:
-            # Geçici dosyaları temizle
+            # Geçici dosyaları temizleme
             for f in [input_video, input_logo]:
                 if os.path.exists(f):
                     try:
