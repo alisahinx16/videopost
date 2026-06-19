@@ -9,12 +9,12 @@ from PIL import Image
 st.set_page_config(page_title="Video Filigran Aracı", layout="centered")
 
 st.title("Mobil Video Filigran Aracı")
-st.write("Sosyal medya videolarınıza dinamik metin ve çoklu logo filigranı ekleyin.")
+st.write("Sosyal medya videolarınıza dinamik metin ve 2'li logo filigranı ekleyin.")
 
 # Kullanıcı Girdileri
 video_url = st.text_input("Sosyal Medya Video Linki")
 uploaded_logo = st.file_uploader("Logo Seçin (PNG/JPG)", type=["png", "jpg", "jpeg"])
-description = st.text_input("Açıklama Metni (Uzun metinler otomatik alt satıra bölünür)")
+description = st.text_input("Açıklama Metni")
 
 def get_video_dimensions(video_path):
     """ffprobe kullanarak videonun genişlik ve yükseklik değerlerini döner."""
@@ -31,18 +31,18 @@ def get_video_dimensions(video_path):
                 return int(stream.get('width')), int(stream.get('height'))
     except:
         pass
-    return 720, 1280  # Hata durumunda varsayılan dikey çözünürlük
+    return 720, 1280  # Hata durumunda varsayılan çözünürlük
 
 def prepare_logo(logo_path, output_logo_path, video_width, opacity=0.35):
     """
-    Logoyu video genişliğinin %12'si olacak şekilde yeniden boyutlandırır,
+    Logoyu video genişliğinin %10'u olacak şekilde yeniden boyutlandırır,
     saydamlık (opacity) ekler ve transparan PNG olarak kaydeder.
     """
     img = Image.open(logo_path).convert("RGBA")
     
-    # Yeni genişlik hesaplama (%12)
-    target_width = int(video_width * 0.12)
-    target_width = max(target_width, 50) # Çok küçük olmasını engellemek için alt sınır
+    # Yeni genişlik hesaplama (%10)
+    target_width = int(video_width * 0.10)
+    target_width = max(target_width, 45) # Alt sınır
     
     # En boy oranını koruyarak yükseklik hesaplama
     aspect_ratio = img.height / img.width
@@ -69,38 +69,44 @@ def download_video(url, output_path):
         ydl.download([url])
 
 def process_video(video_path, logo_path, text, output_path):
-    """FFmpeg ile optimize edilmiş filigran ve dinamik metin işlemesi yapar."""
+    """FFmpeg ile optimize edilmiş 2'li filigran ve güvenli taşmayan metin yerleşimi."""
     width, height = get_video_dimensions(video_path)
     
     # 1. Logoyu Python (Pillow) ile hazırla
     ready_logo_path = "temp_ready_logo.png"
     prepare_logo(logo_path, ready_logo_path, width, opacity=0.35)
     
-    # 2. Metni video genişliğine göre otomatik sar (Wrap text)
-    # 120px logo genişliğine göre yaklaşık 35 karakter satır sınırı idealdir.
-    wrapped_lines = textwrap.wrap(text, width=35)
+    # 2. Dinamik Yazı Boyutu Hesaplama (Video kısa kenarının %4.5'i)
+    font_size = int(min(width, height) * 0.045)
+    font_size = max(font_size, 16)
+    
+    # 3. Yazının Taşmasını Önleyen Matematiksel Satır Bölme (Text Wrap)
+    # Ortalama karakter genişliğini font boyutunun %55'i varsayarak
+    # metnin video genişliğinin %80'ini aşmamasını garanti altına alıyoruz.
+    char_width_estimate = font_size * 0.55
+    max_allowed_text_width = width * 0.80
+    wrap_chars = int(max_allowed_text_width / char_width_estimate)
+    wrap_chars = max(20, min(wrap_chars, 45))  # Güvenli karakter sınır aralığı
+    
+    wrapped_lines = textwrap.wrap(text, width=wrap_chars)
     wrapped_text = "\n".join(wrapped_lines)
     
-    # Metni geçici bir dosyaya yaz (FFmpeg drawtext tırnak/karakter hatalarını önler)
+    # Metni geçici dosyaya yazma (FFmpeg drawtext karakter ve tırnak hatası koruması)
     temp_text_file = "temp_text.txt"
     with open(temp_text_file, "w", encoding="utf-8") as f:
         f.write(wrapped_text)
-        
-    # Dinamik yazı boyutu (Yüksekliğin %3.5'i)
-    font_size = int(height * 0.035)
-    font_size = max(font_size, 16)
     
-    # Metin dikey konumu (Alt bölgeye yakın yerleşim)
-    text_y = int(height * 0.80)
+    # Metnin dikey konumu (Alt bölgeye ortalı)
+    text_y = int(height * 0.78)
 
-    # 5 Noktalı Grid Filtresi (Pillow ile ölçeklendiği için scale işlemine gerek kalmadı)
+    # 2 Noktalı Filigran ve Taşmayan Yazı Alanı Filtreleri
     filter_parts = [
-        '[0:v][1:v]overlay=x=W*0.1:y=H*0.1[v1]',
-        '[v1][1:v]overlay=x=W*0.9-w:y=H*0.1[v2]',
-        '[v2][1:v]overlay=x=(W-w)/2:y=(H-h)/2[v3]',
-        '[v3][1:v]overlay=x=W*0.1:y=H*0.80-h[v4]',
-        '[v4][1:v]overlay=x=W*0.9-w:y=H*0.80-h[v5]',
-        f"[v5]drawtext=textfile='{temp_text_file}':x=(w-text_w)/2:y={text_y}:"
+        # Sol Üst Filigran
+        '[0:v][1:v]overlay=x=W*0.08:y=H*0.08[v1]',
+        # Sağ Üst Filigran (Logo genişliği 'w' hesaba katılarak sağ sınıra yaslanır)
+        '[v1][1:v]overlay=x=W*0.92-w:y=H*0.08[v2]',
+        # Yazı Alanı (Merkezlenmiş ve sınırlandırılmış)
+        f"[v2]drawtext=textfile='{temp_text_file}':x=(w-text_w)/2:y={text_y}:"
         f"fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw=15"
     ]
     
@@ -117,7 +123,7 @@ def process_video(video_path, logo_path, text, output_path):
     
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
-    # İşlem sonrası geçici metin ve işlenmiş logo dosyalarını temizle
+    # Geçici dosyaları temizleme
     if os.path.exists(temp_text_file):
         os.remove(temp_text_file)
     if os.path.exists(ready_logo_path):
@@ -142,12 +148,12 @@ if st.button("Videoyu İşle") and video_url and uploaded_logo:
             with open(input_logo, "wb") as f:
                 f.write(uploaded_logo.getbuffer())
             
-            # Videoyu sosyal medyadan indir
+            # Videoyu indir
             st.info("Video indiriliyor...")
             download_video(video_url, input_video)
             
-            # Dinamik olarak boyutlandır ve birleştir
-            st.info("Logolar optimize ediliyor ve metin sığdırılıyor...")
+            # Dinamik boyutlandırma ve birleştirme
+            st.info("Logolar optimize ediliyor ve yazı alanı boyutlandırılıyor...")
             process_video(input_video, input_logo, description, output_video)
             
             if os.path.exists(output_video):
